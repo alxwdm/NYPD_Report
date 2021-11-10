@@ -1,0 +1,214 @@
+---
+title: "NYPD Analysis"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This project is part of course 5301 "Data Science as a Field" in the Master of Science in Data Science Degree Program from the University of Colorado, Boulder.
+The goal is to show a basic R data science workflow using Rmd, including data cleaning and transformation steps, visualizations and modeling. The analysis will be conducted on the "NYPD Shooting Incidents Data (Historic)" dataset.
+
+## Importing the Data and Cleaning
+
+Here is a link to the dataset: <https://catalog.data.gov/dataset/nypd-shooting-incident-data-historic>
+
+A description of all variables can be found here: <https://data.cityofnewyork.us/Public-Safety/NYPD-Shooting-Incident-Data-Historic-/833y-fsy8>
+
+```{r libraries, echo=F}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r loading}
+nypd <- read.csv("https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD")
+summary(nypd)
+head(nypd)
+```
+Data Cleaning Steps:
+* Remove columns that are not needed
+* Change appropriate variables to factor and date types
+* Check for missing values and handle appropriately
+
+Data Transformation Steps:
+* Transform `OCCUR_HOUR` variable into categorical variable differentiating only between `DAYTIME` and `NIGHTTIME`
+
+```{r cleaning}
+# Cleaning steps:
+# - Remove unwanted columns for this analysis
+# - Change variable types (factor and date)
+nypd.cleaned <- nypd %>%
+    select(-INCIDENT_KEY, -PRECINCT, -LOCATION_DESC, -JURISDICTION_CODE,
+           -X_COORD_CD, -Y_COORD_CD, -Latitude, -Longitude, -Lon_Lat) %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  mutate(STATISTICAL_MURDER_FLAG = as.logical(STATISTICAL_MURDER_FLAG)) %>%   mutate_at(c("BORO", "STATISTICAL_MURDER_FLAG","PERP_AGE_GROUP", "PERP_SEX", "PERP_RACE","VIC_AGE_GROUP", "VIC_SEX", "VIC_RACE"), factor) %>% 
+  separate(OCCUR_TIME, c("OCCUR_HOUR", "minute", "second"), sep = ":") %>% select(-minute, -second) %>%
+  mutate(OCCUR_HOUR = as.numeric(OCCUR_HOUR)) %>% 
+  mutate(OCCUR_HOUR = case_when(OCCUR_HOUR < 6 ~ 'NIGHTTIME',
+                                OCCUR_HOUR > 18 ~ 'NIGHTTIME',
+                                TRUE ~ 'DAYTIME')) %>%
+  mutate(OCCUR_HOUR = as.factor(OCCUR_HOUR))
+head(nypd.cleaned)
+```
+The cleaned dataset has no `NA` values, although there is a large amount of missing information regarding the perpetrators (sex, age and race). For some part of this analysis (for example time-of-day comparisons or time-series visualizations, see below), the missing information does not matter and the data can still be included in the calculations. 
+However, when demographic data is considered, the missing information should be excluded from the analysis. This is the case when, for example, race is used in some kind of statistic. 
+
+```{r cleaned summary}
+summary(nypd.cleaned)
+```
+According to the dataset, most incidents occur during the nighttime (i.e. from 6 pm to 6 am).
+
+```{r timeofday}
+nypd.timeofday <- nypd.cleaned %>%
+  group_by(OCCUR_HOUR) %>%
+  summarize(SUM_CASES = n()) %>%
+  ungroup() 
+nypd.timeofday
+```
+We can see that - when omitting cases where there is not enough information on the perpetrator's race - most shootings are between people of the same race. There are only half as many "interracial" shootings.
+
+```{r racialconflicts}
+nypd.racial <- nypd.cleaned %>%
+  filter(PERP_RACE != "") %>%
+  mutate(INTERRACIAL = if_else(as.character(PERP_RACE)!=as.character(VIC_RACE),
+         T, F)) %>%
+  group_by(INTERRACIAL) %>%
+  summarize(SUM_CASES = n()) %>%
+  ungroup() 
+nypd.racial
+```
+
+## Visualizations
+
+The following plot shows the monthly number of shootings:
+
+```{r timeseries, echo=FALSE}
+nypd.monthly <- nypd.cleaned %>%
+  group_by(OCCUR_MONTH = floor_date(OCCUR_DATE, "month")) %>%
+  summarize(TOTAL_SHOOTINGS = n(),
+            FATAL_SHOOTINGS = sum(STATISTICAL_MURDER_FLAG==T)) %>%
+  ungroup()
+
+nypd.monthly %>%
+  ggplot(aes(x=OCCUR_MONTH)) +
+  geom_line(aes(y=TOTAL_SHOOTINGS, color="total")) +
+  geom_line(aes(y=FATAL_SHOOTINGS, color="fatal")) +
+  labs(title="Monthly Shootings in New York", 
+       x=NULL, y="Number of Shootings") +
+  scale_x_date(date_breaks="year", date_labels="%Y")
+```
+Interestingly, we can see a seasonal pattern and an exceptionally high amount of shootings in the middle of 2020 (probably due to the COVID-19 crisis?).
+
+```{r timeseries2, echo=FALSE}
+nypd.ratio <- nypd.monthly %>%
+  mutate(FATAL_RATIO = FATAL_SHOOTINGS/TOTAL_SHOOTINGS) %>%
+  ungroup()
+
+nypd.ratio %>%
+  ggplot(aes(x=OCCUR_MONTH)) +
+  geom_line(aes(y=FATAL_RATIO, color="fatal")) +
+  geom_line(aes(y=mean(FATAL_RATIO), color="mean")) +
+  labs(title="Rate of Fatal Shootings in New York", 
+       x=NULL, y="Number of Shootings") +
+  scale_x_date(date_breaks="year", date_labels="%Y")
+```
+Regarding the frequency of fatal outcomes of shootings, the rate has a large variance but no clear pattern is visible. In total, roughly 20% of all shooting incidents are fatal for the victim.
+
+```{r month boxplot, echo=FALSE}
+nypd.permonth <- nypd.cleaned %>%
+  mutate(OCCUR_MONTH = month(floor_date(OCCUR_DATE, "month")))
+
+nypd.permonth %>%
+  ggplot(aes(OCCUR_MONTH)) +
+  geom_bar(aes(fill=STATISTICAL_MURDER_FLAG)) +
+  scale_fill_manual("Fatal", values = c("turquoise3", "indianred1")) +
+  labs(title="Aggregated Monthly Shootings in New York", 
+       x="Month", y="Number of Shootings") +
+  scale_x_continuous(breaks=c(1,2,3,4, 5, 6, 7, 8, 9, 10, 11, 12))
+```
+Another interesting question is to further investigate the seasonal pattern that was present in the time series plot from above. From the dataset, it can be seen that the total number of shootings per month is much larger in warmer months than it is in colder months, with the peak being July and the bottom being February. The reason for that can only be guessed, but it could be that in warmer months people tend to go outside more, meet more and, ultimately, have more conflicts than in winter time.
+
+## Modeling Shooting Incidents
+
+The goal of my model will be to predict whether a shooting incident will be fatal or not. For this, I will use logistic regression. The data will be split into a training set used to fit the model, and a test set. Since incidents without fatal outcomes are 4 times more likely, undersampling will be used to avoid issues with imbalanced classes. Undersampling is used since there are enough data points available and it is easy to apply, although other techniques might yield better results.
+
+```{r train-test split, echo=TRUE}
+head(nypd.cleaned)
+
+# train-test split
+bound = floor(nrow(nypd.cleaned)*0.8)           
+df = nypd.cleaned[sample(nrow(nypd.cleaned)), ]           
+df_train = df[1:bound, ] 
+df_test = df[(bound+1):nrow(df), ]
+
+# balance training set
+df_train_notfatal = df_train[df_train$STATISTICAL_MURDER_FLAG==F,]
+df_train_fatal = df_train[df_train$STATISTICAL_MURDER_FLAG==T,]
+df_train_notfatal = df_train_notfatal[sample(nrow(df_train_fatal)),]
+df_train_balanced = rbind(df_train_fatal, df_train_notfatal)
+df_train_balanced = df_train_balanced[sample(nrow(df_train_balanced)), ]
+
+cat("Train Set Dimensions: \t(", dim(df_train_balanced)[1], 
+    ",", dim(df_train_balanced)[2], ")", 
+    "\nTest Set Dimensions: \t(", dim(df_test)[1], " ,", dim(df_test)[2], ")")
+```
+
+Here is how the model is trained. All non-significant predictors were removed. 
+Note: You will learn more about generalized linear models in DTSA 5013 (I have already taken this course).
+
+```{r modelling, echo=TRUE}
+#nypd.cleaned$PERP_RACE
+nypd.mod = glm(STATISTICAL_MURDER_FLAG ~ 
+                 PERP_AGE_GROUP + VIC_AGE_GROUP,
+               family="binomial", df_train_balanced)
+summary(nypd.mod)
+```
+The evaluation shows a relatively low F1-score, meaning that it is hard to predict whether a shooting will be fatal or not, given this dataset. The metrics on the test dataset show that only about 63% of incidents are predicted correctly, with a relatively large false positive rate (which may not be too bad in a real-world application on predictive crime). Out of the fatal shootings, roughly half of them are predicted as such. 
+
+```{r evaluation, echo=TRUE}
+predictions = round(predict(nypd.mod, df_test, type='response'))
+sum(predictions)
+truth = as.integer(as.logical(df_test$STATISTICAL_MURDER_FLAG))
+
+tp = 0
+tn = 0
+fp = 0
+fn = 0
+for(i in 1:length(predictions)) {
+  # truth is negative
+  if(truth[i] == 0){
+      if(predictions[i] == 0){tn = tn+1}
+      else {fp = fp+1}
+  }
+  # truth is positive
+  if(truth[i] == 1){
+      if(predictions[i] == 1){tp = tp+1}
+      else {fn = fn+1}
+  }  
+}
+
+cat('True Positive:', tp, 'False Positive:', fp,
+    '\nFalse Negative:', fn, 'True Negative:', tn)
+
+accuracy = (tp+tn)/(tp+tn+fp+fn)
+precision = tp/(tp+fp)
+recall = tp/(tp+fn)
+f.score = 2*precision*recall/(precision+recall) 
+
+cat('Accuracy:', round(accuracy, 2), 
+    'Precision:', round(precision, 2), 
+    'Recall:', round(recall, 2), 
+    'F-score:', round(f.score, 2))
+```
+## Bias Identification
+
+As a European citizen, I am biased towards being in favor of stricter firearm regulation laws. This might lead to analyzing the dataset in a way that supports such policies. I tried to mitigate the bias by considering all aspects of the dataset and not only pick the ones that support my beliefs for this analysis.
+
+## R Session Info
+```{r session info, echo=TRUE}
+sessionInfo()
+```
+
